@@ -1,1 +1,82 @@
+name: Build APK
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mendukung dua cara upload: file proyek langsung, atau satu file .zip di root repo
+      - name: Siapkan proyek
+        id: prep
+        run: |
+          if [ -f settings.gradle.kts ]; then
+            DIR=.
+          else
+            ZIP=$(ls ./*.zip 2>/dev/null | head -n 1 || true)
+            if [ -z "$ZIP" ]; then
+              echo "::error::Tidak ditemukan settings.gradle.kts maupun file .zip di root repo"
+              exit 1
+            fi
+            mkdir -p project
+            unzip -q -o "$ZIP" -d project
+            FOUND=$(find project -maxdepth 2 -name settings.gradle.kts | head -n 1)
+            if [ -z "$FOUND" ]; then
+              echo "::error::settings.gradle.kts tidak ada di dalam zip"
+              exit 1
+            fi
+            DIR=$(dirname "$FOUND")
+          fi
+          echo "Proyek ada di: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Siapkan keystore
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "Keystore rilis dipakai."
+          else
+            echo "Secret KEYSTORE_BASE64 belum diset, APK ditandatangani dengan kunci debug."
+          fi
+
+      - name: Build APK
+        working-directory: ${{ steps.prep.outputs.dir }}
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
+
+      - name: Simpan APK sebagai artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Atmosphere-apk
+          path: ${{ steps.prep.outputs.dir }}/app/build/outputs/apk/release/*.apk
+
+      # APK juga dipasang di halaman Releases supaya bisa diunduh langsung dari HP
+      - name: Buat Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Atmosphere build ${{ github.run_number }}
+          files: ${{ steps.prep.outputs.dir }}/app/build/outputs/apk/release/*.apk
